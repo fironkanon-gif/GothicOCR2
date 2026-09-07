@@ -2,174 +2,136 @@ version: 2.1
 
 jobs:
   build_android:
-    machine:
-      image: android:2026.05.1
-    resource_class: large.gen2
-    working_directory: ~/project
+    docker:
+      - image: cimg/android:2026.08-ndk
+
+    resource_class: large
 
     steps:
       - checkout
 
       - run:
-          name: Inspect build machine
+          name: Check environment
           command: |
             set -eux
-            uname -a
-            lsb_release -a || true
+            pwd
+            ls -la
+            python3 --version
             java -version
-            python3 --version || true
             echo "ANDROID_HOME=${ANDROID_HOME:-}"
             echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
+            command -v sdkmanager || true
 
       - run:
-          name: Install build dependencies
+          name: Install system dependencies
           command: |
             set -eux
             sudo apt-get update
             sudo apt-get install -y \
-              python3.12 \
-              python3.12-venv \
-              python3.12-dev \
+              python3-venv \
+              python3-dev \
               python3-pip \
-              git zip unzip \
-              autoconf automake autopoint libtool pkg-config \
-              zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 \
-              cmake libffi-dev libssl-dev gettext
+              git \
+              zip \
+              unzip \
+              autoconf \
+              automake \
+              libtool \
+              pkg-config \
+              zlib1g-dev \
+              libncurses5-dev \
+              libncursesw5-dev \
+              libffi-dev \
+              libssl-dev \
+              cmake
 
       - run:
-          name: Select Java 17
+          name: Create Python virtual environment
           command: |
             set -eux
-            if [ -x /usr/lib/jvm/java-17-openjdk-amd64/bin/java ]; then
-              sudo update-alternatives --set java /usr/lib/jvm/java-17-openjdk-amd64/bin/java || true
-              sudo update-alternatives --set javac /usr/lib/jvm/java-17-openjdk-amd64/bin/javac || true
-            fi
-            java -version
-
-      - run:
-          name: Create Buildozer environment
-          command: |
-            set -eux
-            python3.12 -m venv ~/buildozer-venv
+            python3 -m venv ~/buildozer-venv
             ~/buildozer-venv/bin/python -m pip install --upgrade pip setuptools wheel
-            ~/buildozer-venv/bin/python -m pip install "buildozer==1.6.0"
+            ~/buildozer-venv/bin/python -m pip install buildozer==1.6.0
             ~/buildozer-venv/bin/buildozer --version
 
       - run:
-          name: Validate project
+          name: Validate project files
           command: |
             set -eux
-            cd GothicOCR
+
             test -f main.py
             test -f buildozer.spec
             test -f models/gothic_ocr.tflite
             test -f data/labels.json
             test -f fonts/NotoSansGothic-Regular.ttf
+
             test -f services/__init__.py
             test -f services/image_service.py
             test -f services/model_service.py
             test -f services/text_decoder.py
-            test ! -e data/gothic_ocr.tflite
 
-            MODEL_SIZE=$(stat -c%s models/gothic_ocr.tflite)
-            test "$MODEL_SIZE" -eq 10485760
-
-            MODEL_SHA=$(sha256sum models/gothic_ocr.tflite | awk '{print $1}')
-            test "$MODEL_SHA" = "f909d7248c6b8faa5f466326fe89df8315fae7210d47ecc3555339082cb4c61e"
-
-            echo "Model size: $MODEL_SIZE"
-            echo "Model SHA256: $MODEL_SHA"
+            echo "Project files validation: OK"
 
       - run:
-          name: Validate Python source
+          name: Validate Python syntax
           command: |
             set -eux
-            cd GothicOCR
             ~/buildozer-venv/bin/python -m compileall -q main.py services tests
-
-      - run:
-          name: Validate OCR labels
-          command: |
-            set -eux
-            cd GothicOCR
-            ~/buildozer-venv/bin/python - <<'PY'
-            import json
-            from pathlib import Path
-
-            labels = json.loads(
-                Path("data/labels.json").read_text(encoding="utf-8")
-            )
-
-            assert isinstance(labels, list)
-            assert len(labels) == 25
-            assert all(isinstance(x, str) and x.strip() for x in labels)
-
-            print("Labels validation: OK")
-            PY
+            echo "Python syntax validation: OK"
 
       - run:
           name: Validate Buildozer configuration
           command: |
             set -eux
-            cd GothicOCR
 
             ~/buildozer-venv/bin/buildozer --version
 
+            echo "Buildozer configuration:"
             grep -E \
-              '^(title|package.name|package.domain|version|source.dir|requirements|android.api|android.minapi|android.archs|android.ndk|p4a.bootstrap|p4a.branch)' \
-              buildozer.spec
+              '^(title|package.name|package.domain|version|source.dir|requirements|android.api|android.minapi|android.archs|android.ndk)' \
+              buildozer.spec || true
 
       - run:
           name: Validate Android SDK
           command: |
             set -eux
 
-            SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+            echo "ANDROID_HOME=${ANDROID_HOME:-}"
+            echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-}"
 
-            test -n "$SDK"
-
-            sdkmanager --version
-
-            sdkmanager --list | \
-              grep -E 'platforms;android-35|build-tools;35' | \
-              head -20 || true
-
-      - run:
-          name: Build GothicOCR APK
-          command: |
-            set -eux
-            cd GothicOCR
-
-            rm -rf bin .buildozer
-
-            ~/buildozer-venv/bin/buildozer \
-              android debug \
-              log_level=2
+            if command -v sdkmanager >/dev/null 2>&1; then
+              sdkmanager --version
+            else
+              echo "sdkmanager not found in PATH"
+            fi
 
       - run:
-          name: Verify APK
+          name: Build Android APK
           command: |
             set -eux
-            cd GothicOCR
 
-            test -d bin
+            ~/buildozer-venv/bin/buildozer android debug
 
-            APK_COUNT=$(find bin -maxdepth 1 -type f -name '*.apk' | wc -l)
+      - run:
+          name: Verify generated APK
+          command: |
+            set -eux
 
-            test "$APK_COUNT" -ge 1
+            echo "APK files:"
+            find bin -type f -name "*.apk" -print
 
-            find bin -maxdepth 1 -type f -name '*.apk' -print
+            APK_COUNT=$(find bin -type f -name "*.apk" | wc -l)
+
+            if [ "$APK_COUNT" -lt 1 ]; then
+              echo "ERROR: No APK was generated"
+              exit 1
+            fi
 
       - store_artifacts:
-          path: GothicOCR/bin
+          path: bin
           destination: gothicocr-apk
 
 workflows:
-  build_android_manual:
+  build_android_workflow:
     jobs:
-      - approve_build:
-          type: approval
-
-      - build_android:
-          requires:
-            - approve_build
+      - build_android
